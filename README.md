@@ -1,5 +1,5 @@
 # m3u8-downloader
-m3u8 downloader
+multi-threading download m3u8 files and using `ffmpeg` convert to single video file
 
 ## usage
 ```shell
