@@ -357,6 +357,7 @@ def usage():
     print('-o\t\t\t输出文件名')
     print('')
     print('advance options:')
+    print('-b\t\t\t指定下载片段的网址')
     print('-p\t\t\t跳过非连续片段(非连续片段可能是广告)')
     print('-k\t\t\tkey 文件地址')
 

@@ -11,7 +11,9 @@ basic options:
 -o		    output file
 
 advance options:
--k			skip discontinuity (more like advertise)
+-b          base url path for download ts files
+-p          skip discontinuity (more like advertise)
+-k          key file path (replace key file)
 
 Process finished with exit code 1
 ```
@@ -19,5 +21,5 @@ Process finished with exit code 1
 for example
 
 ```shell
-python3 m3u8-downloader.py -i teacher_cang.m3u8 -c cache -k -o teacher_cang.mp4
+python3 m3u8-downloader.py -i teacher_cang.m3u8 -c cache -p -o teacher_cang.mp4
 ```
