@@ -12,21 +12,27 @@ import sys
 class MediaPart:
     def __init__(self, url, time_len, cryptor):
         self.url = url
-        self.filename = re.search('([a-zA-Z0-9-_]+\\.ts)', url).group(1).strip()
+        self.filename = url.split('/')[-1].replace('+', '_')
+        if len(self.filename) < 3 or self.filename[-3:].lower() != '.ts':
+            self.filename += '.ts'
         self.time_len = time_len
         self.cryptor = cryptor
         self.downloaded = False
         self.data_len = 0
         self.retry_times = 0
 
+    def rename(self):
+        self.filename = '{0}_0.ts'.format(self.filename[:-3])
+
 
 class M3U8File:
-    def __init__(self, file_or_url, target_filename, cache='cache/', skip_discontinuity=False):
+    def __init__(self, file_or_url, base_url, target_filename, cache='cache/', skip_discontinuity=False, key_path=None):
         self.file_or_url = file_or_url
         self.target_filename = target_filename
         self.cache = cache
         self.skip_discontinuity = skip_discontinuity
-        self.base_url = ''
+        self.key_path = key_path
+        self.base_url = base_url
         self.download_headers = {}
         self.key_headers = {}
         self.media_parts = []
@@ -73,9 +79,29 @@ class M3U8File:
 
     def _read_file(self, file_or_url):
         if file_or_url[:7].lower() == 'http://' or file_or_url[:8] == 'https://':
+            self.base_url = os.path.dirname(file_or_url) + '/'
             return self._read_from_url(file_or_url)
         else:
             return self._read_from_file(file_or_url)
+
+    def _get_key_from_url(self, key_url):
+        resp = requests.get(key_url, headers=self.key_headers)
+        key = resp.content
+        return key
+
+    def _get_key_from_file(self, key_name):
+        if self.key_path is not None:
+            key_path = os.path.dirname(self.key_path)
+        else:
+            key_path = os.path.dirname(self.file_or_url)
+
+        key_path = os.path.join(key_path, key_name)
+        try:
+            with open(key_path, 'rb') as f:
+                key = f.read()
+        except Exception as _:
+            raise FileNotFoundError()
+        return key
 
     def _get_key(self, key_intro):
         params = key_intro.split(',')
@@ -86,10 +112,22 @@ class M3U8File:
             if kv[0].strip().upper() == 'METHOD':
                 method = kv[1].strip()
             if kv[0].strip().upper() == 'URI':
-                key_url = re.search('"(.*?key.key)"', kv[1]).group(1).strip()
+                key_url = re.search('"(.*?[\\w]*.key)"', kv[1]).group(1).strip()
         if len(key_url) > 0:
-            resp = requests.get(key_url, headers=self.key_headers)
-            key = resp.content
+            if self.key_path is not None:
+                key = self._get_key_from_file(key_url)
+            else:
+                if key_url[:7].lower() != 'http://' and key_url[:8].lower() != 'https://' and \
+                   self.base_url is not None and len(self.base_url) > 0:
+                    key_url = os.path.join(self.base_url, key_url)
+                if key_url[:7].lower() == 'http://' or key_url[:8].lower() == 'https://':
+                    key = self._get_key_from_url(key_url)
+                else:
+                    key_url = os.path.join(os.path.dirname(self.file_or_url), key_url)
+                    if key_url[:7].lower() == 'http://' or key_url[:8].lower() == 'https://':
+                        key = self._get_key_from_url(key_url)
+                    else:
+                        key = self._get_key_from_file(key_url)
             if method.upper() == 'AES-128':
                 cryptor = AES.new(key, AES.MODE_CBC, key)
             else:
@@ -115,6 +153,13 @@ class M3U8File:
         s += '{0} 秒'.format(int(time_len))
         return s
 
+    def _rename_repeat_name(self):
+        names = []
+        for mp in self.media_parts:
+            while mp.filename in names:
+                mp.rename()
+            names.append(mp.filename)
+
     def _parse_m3u8(self, text_lines):
         self.media_parts.clear()
         self.total_time = 0
@@ -124,6 +169,7 @@ class M3U8File:
         current_key = None
         time_len = 0
         skip = False
+        is_next_video_path = False
 
         for line in text_lines:
             if len(line) == 0:
@@ -145,6 +191,7 @@ class M3U8File:
                     current_key = self._get_key(':'.join(sec[1:]).strip())
                 elif xtitle == 'EXTINF':
                     time_len = float(sec[1].split(',')[0])
+                    is_next_video_path = True
                 elif xtitle == 'EXT-X-DISCONTINUITY':
                     if self.skip_discontinuity:
                         if not skip:
@@ -155,20 +202,22 @@ class M3U8File:
                     break
                 else:
                     print('unknown line: {0}'.format(line))
-            elif '.js' in line or '.ts' in line:
+            elif is_next_video_path:
+                is_next_video_path = False
                 if skip:
                     self.skiped_count += 1
                     self.skiped_total_time += time_len
                 else:
                     self.total_time += time_len
-                    if '.js' in line:
-                        line = re.sub('\\.js', '.ts', line)
-                    if 'http' not in line:
-                        line = self.base_url + line
+                    if len(line) < 7 or (line[:7].lower() != 'http://' and line[:8].lower() != 'https://'):
+                        if self.base_url is None or len(self.base_url) == 0:
+                            raise FileNotFoundError('请使用 -b 指定视频文件的链接')
+                        line = os.path.join(self.base_url, line)
                     self.media_parts.append(MediaPart(line, time_len, current_key))
             else:
                 print('[warning] 解析文件，未知内容: {0}'.format(line))
 
+        self._rename_repeat_name()
         intro = '解析完成，共 {0} 个段落，时长 {1}'.format(len(self.media_parts), self._format_time(self.total_time))
         if self.skip_discontinuity and self.skiped_count > 0:
             intro += '，跳过 {0}'.format(self._format_time(self.skiped_total_time))
@@ -187,7 +236,7 @@ class M3U8File:
             return
 
         if retrying:
-            will_retry = input('还有 {0} 个文件未下载，是否重试？ [Y/n]')
+            will_retry = input('还有 {0} 个文件未下载，是否重试？ [Y/n]'.format(mp_count))
             if will_retry.lower() != 'y':
                 return
 
@@ -239,6 +288,8 @@ class M3U8File:
                 # noinspection PyUnresolvedReferences
                 requests.packages.urllib3.disable_warnings()
                 resp = requests.get(mp.url, headers=headers)
+                if resp.status_code != 200:
+                    raise FileNotFoundError()
                 with open(savepath, 'wb') as f:
                     if mp.cryptor is not None:
                         data = mp.cryptor.decrypt(resp.content)
@@ -298,7 +349,7 @@ class M3U8File:
 def usage():
     print(os.path.basename(sys.argv[0]), '多线程下载 M3U8 并合并文件')
     print('')
-    print('usage: {0} -i m3u8file [-c cache] [-k] -o outfile'.format(os.path.basename(sys.argv[0])))
+    print('usage: {0} -i m3u8file [-c cache] [-p] [-k key file path] -o outfile'.format(os.path.basename(sys.argv[0])))
     print('')
     print('basic options:')
     print('-i\t\t\tM3U8 文件地址')
@@ -306,7 +357,8 @@ def usage():
     print('-o\t\t\t输出文件名')
     print('')
     print('advance options:')
-    print('-k\t\t\t跳过非连续片段(非连续片段可能是广告)')
+    print('-p\t\t\t跳过非连续片段(非连续片段可能是广告)')
+    print('-k\t\t\tkey 文件地址')
 
 
 if __name__ == '__main__':
@@ -314,9 +366,11 @@ if __name__ == '__main__':
         usage()
         exit(1)
 
+    video_base_url = None
     m3u8_url = None
     output_file = None
     cache_path = 'cache/'
+    sec_key_path = None
     skip_disc = False
 
     arg_index = 1
@@ -330,9 +384,15 @@ if __name__ == '__main__':
         elif sys.argv[arg_index].lower() == '-o' and len(sys.argv) > (arg_index+1):
             output_file = sys.argv[arg_index+1]
             arg_index += 2
-        elif sys.argv[arg_index].lower() == '-k':
+        elif sys.argv[arg_index].lower() == '-p':
             skip_disc = True
             arg_index += 1
+        elif sys.argv[arg_index].lower() == '-k' and len(sys.argv) > (arg_index+1):
+            sec_key_path = sys.argv[arg_index+1]
+            arg_index += 2
+        elif sys.argv[arg_index].lower() == '-b' and len(sys.argv) > (arg_index+1):
+            video_base_url = sys.argv[arg_index+1]
+            arg_index += 2
         else:
             arg_index += 1
 
@@ -343,4 +403,4 @@ if __name__ == '__main__':
     if not os.path.exists(cache_path):
         os.mkdir(cache_path)
 
-    M3U8File(m3u8_url, output_file, cache_path, skip_disc).download()
+    M3U8File(m3u8_url, video_base_url, output_file, cache_path, skip_disc, sec_key_path).download()
