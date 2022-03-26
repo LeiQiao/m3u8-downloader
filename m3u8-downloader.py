@@ -7,16 +7,18 @@ import time
 import datetime
 import os
 import sys
+from urllib.parse import urljoin
 
 
 class MediaPart:
-    def __init__(self, url, time_len, cryptor):
+    def __init__(self, url, time_len, cryptor, header):
         self.url = url
         self.filename = url.split('/')[-1].replace('+', '_')
         if len(self.filename) < 3 or self.filename[-3:].lower() != '.ts':
             self.filename += '.ts'
         self.time_len = time_len
         self.cryptor = cryptor
+        self.header = header
         self.downloaded = False
         self.data_len = 0
         self.retry_times = 0
@@ -40,7 +42,7 @@ class M3U8File:
         self.skiped_total_time = 0
         self.skiped_count = 0
 
-    def download(self):
+    def download(self, merge=True):
         # noinspection PyBroadException
         try:
             m3u8_content = self._read_file(self.file_or_url)
@@ -56,8 +58,10 @@ class M3U8File:
 
         self._parse_m3u8(text_lines)
         self._multiprocess_download()
-        self._merge_file()
-        self._remove_cache()
+        filelist = self._make_filelist()
+        if merge:
+            self._merge_file(filelist)
+            self._remove_cache()
 
     # noinspection PyMethodMayBeStatic
     def _read_from_file(self, file):
@@ -119,11 +123,11 @@ class M3U8File:
             else:
                 if key_url[:7].lower() != 'http://' and key_url[:8].lower() != 'https://' and \
                    self.base_url is not None and len(self.base_url) > 0:
-                    key_url = os.path.join(self.base_url, key_url)
+                    key_url = urljoin(self.base_url, key_url)
                 if key_url[:7].lower() == 'http://' or key_url[:8].lower() == 'https://':
                     key = self._get_key_from_url(key_url)
                 else:
-                    key_url = os.path.join(os.path.dirname(self.file_or_url), key_url)
+                    key_url = urljoin(os.path.dirname(self.file_or_url), key_url)
                     if key_url[:7].lower() == 'http://' or key_url[:8].lower() == 'https://':
                         key = self._get_key_from_url(key_url)
                     else:
@@ -133,6 +137,41 @@ class M3U8File:
             else:
                 raise NotImplementedError('method [{0}] not implemented.'.format(method))
             return cryptor
+        else:
+            return None
+
+    def _parse_x_map(self, x_map):
+        params = x_map.split(',')
+        byte_range = None
+        key_url = None
+        for p in params:
+            kv = p.split('=')
+            if kv[0].strip().upper() == 'URI':
+                key_url = kv[1].strip()
+                if key_url[0] == '"':
+                    key_url = key_url[1:-1]
+            if kv[0].strip().upper() == 'BYTERANGE':
+                byte_range = kv[1].strip()
+                if byte_range[0] == '"':
+                    byte_range = byte_range[1:-1]
+        if len(key_url) > 0:
+            if key_url[:7].lower() != 'http://' and key_url[:8].lower() != 'https://' and \
+               self.base_url is not None and len(self.base_url) > 0:
+                key_url = urljoin(self.base_url, key_url)
+            if key_url[:7].lower() == 'http://' or key_url[:8].lower() == 'https://':
+                key = self._get_key_from_url(key_url)
+            else:
+                key_url = urljoin(os.path.dirname(self.file_or_url), key_url)
+                if key_url[:7].lower() == 'http://' or key_url[:8].lower() == 'https://':
+                    key = self._get_key_from_url(key_url)
+                else:
+                    key = self._get_key_from_file(key_url)
+            if byte_range is not None:
+                byte_range = byte_range.split('@')
+                start_pos = int(byte_range[0].strip())
+                end_pos = int(byte_range[1].strip())
+                key = key[start_pos:end_pos]
+            return key
         else:
             return None
 
@@ -167,6 +206,7 @@ class M3U8File:
         self.skiped_total_time = 0
 
         current_key = None
+        x_map = None
         time_len = 0
         skip = False
         is_next_video_path = False
@@ -178,6 +218,8 @@ class M3U8File:
                 sec = line[1:].split(':')
                 xtitle = sec[0].strip().upper()
                 if xtitle == 'EXTM3U':
+                    pass
+                elif xtitle == 'EXT-X-ALLOW-CACHE':
                     pass
                 elif xtitle == 'EXT-X-VERSION':
                     print("version: ", sec[1].strip())
@@ -200,6 +242,8 @@ class M3U8File:
                             skip = False
                 elif xtitle == 'EXT-X-ENDLIST':
                     break
+                elif xtitle == 'EXT-X-MAP':
+                    x_map = self._parse_x_map(sec[1].strip())
                 else:
                     print('unknown line: {0}'.format(line))
             elif is_next_video_path:
@@ -212,8 +256,8 @@ class M3U8File:
                     if len(line) < 7 or (line[:7].lower() != 'http://' and line[:8].lower() != 'https://'):
                         if self.base_url is None or len(self.base_url) == 0:
                             raise FileNotFoundError('请使用 -b 指定视频文件的链接')
-                        line = os.path.join(self.base_url, line)
-                    self.media_parts.append(MediaPart(line, time_len, current_key))
+                        line = urljoin(self.base_url, line)
+                    self.media_parts.append(MediaPart(line, time_len, current_key, x_map))
             else:
                 print('[warning] 解析文件，未知内容: {0}'.format(line))
 
@@ -295,6 +339,8 @@ class M3U8File:
                         data = mp.cryptor.decrypt(resp.content)
                     else:
                         data = resp.content
+                    if mp.header is not None:
+                        f.write(mp.header)
                     f.write(data)
                     mp.downloaded = True
                     mp.data_len = len(data)
@@ -307,21 +353,24 @@ class M3U8File:
                     # print("\n", '任务文件 ', mp.filename, ' 下载失败, 重试第 {0} 次'.format(mp.retry_times))
                     ts_queue.put(mp)
 
-    def _merge_file(self):
-        print('')
-        print('开始合并视频')
-        start = datetime.datetime.now().replace(microsecond=0)
-
+    def _make_filelist(self):
         filelist = os.path.join(self.cache, 'filelist.txt')
         with open(filelist, 'w') as f:
             for mp in self.media_parts:
                 if not mp.downloaded:
                     continue
                 f.write('file {0}\n'.format(mp.filename))
+        return filelist
+
+    def _merge_file(self, filelist):
+        print('')
+        print('开始合并视频')
+        start = datetime.datetime.now().replace(microsecond=0)
 
         # noinspection PyBroadException
         try:
-            command = 'ffmpeg -y -f concat -i %s -bsf:a aac_adtstoasc -c copy %s' % (filelist, self.target_filename)
+            command = 'ffmpeg '
+            command += ' -y -f concat -i %s -bsf:a aac_adtstoasc -c copy %s' % (filelist, self.target_filename)
             os.system(command)
             print('视频合并完成')
         except Exception as _:
@@ -335,7 +384,10 @@ class M3U8File:
         print('')
         print('开始清除缓存')
         for mp in self.media_parts:
-            os.remove(os.path.join(self.cache, mp.filename))
+            try:
+                os.remove(os.path.join(self.cache, mp.filename))
+            except Exception as _:
+                print('删除文件 {0} 失败，skip'.format(mp.filename))
         print("ts 文件全部删除")
 
         # noinspection PyBroadException
@@ -357,6 +409,7 @@ def usage():
     print('-o\t\t\t输出文件名')
     print('')
     print('advance options:')
+    print('--no-merge\t\t\t只下载，不合并视频')
     print('-b\t\t\t指定下载片段的网址')
     print('-p\t\t\t跳过非连续片段(非连续片段可能是广告)')
     print('-k\t\t\tkey 文件地址')
@@ -373,6 +426,7 @@ if __name__ == '__main__':
     cache_path = 'cache/'
     sec_key_path = None
     skip_disc = False
+    no_merge = False
 
     arg_index = 1
     while arg_index < len(sys.argv):
@@ -391,17 +445,22 @@ if __name__ == '__main__':
         elif sys.argv[arg_index].lower() == '-k' and len(sys.argv) > (arg_index+1):
             sec_key_path = sys.argv[arg_index+1]
             arg_index += 2
+        elif sys.argv[arg_index].lower() == '--no-merge':
+            no_merge = True
+            arg_index += 1
         elif sys.argv[arg_index].lower() == '-b' and len(sys.argv) > (arg_index+1):
             video_base_url = sys.argv[arg_index+1]
             arg_index += 2
         else:
             arg_index += 1
 
-    if m3u8_url is None or output_file is None:
+    if m3u8_url is None or \
+       ((not no_merge) and output_file is None) or \
+       (no_merge and output_file is not None):
         usage()
         exit(1)
 
     if not os.path.exists(cache_path):
         os.mkdir(cache_path)
 
-    M3U8File(m3u8_url, video_base_url, output_file, cache_path, skip_disc, sec_key_path).download()
+    M3U8File(m3u8_url, video_base_url, output_file, cache_path, skip_disc, sec_key_path).download(not no_merge)
