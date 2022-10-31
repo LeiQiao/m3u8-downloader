@@ -58,8 +58,8 @@ class M3U8File:
 
         self._parse_m3u8(text_lines)
         self._multiprocess_download()
-        filelist = self._make_filelist()
         if merge:
+            filelist = self._make_filelist()
             self._merge_file(filelist)
             self._remove_cache()
 
@@ -355,11 +355,20 @@ class M3U8File:
 
     def _make_filelist(self):
         filelist = os.path.join(self.cache, 'filelist.txt')
+        i = 1
         with open(filelist, 'w') as f:
             for mp in self.media_parts:
                 if not mp.downloaded:
                     continue
+                src_name = os.path.join(self.cache, mp.filename)
+                tmp_name = os.path.join(os.path.dirname(src_name), 'tmp-%s.ts' % (i))
+                command = 'ffmpeg '
+                command += ' -y -i %s -c copy %s' % (src_name, tmp_name)
+                os.system(command)
+                command = 'mv %s %s' % (tmp_name, src_name)
+                os.system(command)
                 f.write('file {0}\n'.format(mp.filename))
+                i += 1
         return filelist
 
     def _merge_file(self, filelist):
